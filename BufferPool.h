@@ -18,8 +18,8 @@ namespace bos::mm
     public:
         enum class Type
         {
-            NORMAL,  // 普通内存
-            DMABUF   // DMA缓冲区
+            NORMAL, // 普通内存
+            DMABUF  // DMA缓冲区
         };
 
         // 构造函数
@@ -33,7 +33,7 @@ namespace bos::mm
             else if (type == Type::DMABUF && dma_fd != -1)
             {
                 // 映射DMA文件描述符到内存
-                data = static_cast<uint8_t *>(mmap(nullptr, size, PROT_READ | PROT_WRITE, MAP_SHARED, dma_fd, 0));
+                data.reset(static_cast<uint8_t *>(mmap(nullptr, size, PROT_READ | PROT_WRITE, MAP_SHARED, dma_fd, 0)));
                 if (data == MAP_FAILED)
                 {
                     throw std::runtime_error("Failed to map DMA buffer to memory.");
@@ -51,12 +51,16 @@ namespace bos::mm
             if (type == Type::DMABUF && data != nullptr)
             {
                 // 解除映射
-                munmap(data, size);
+                munmap(data.get(), size);
             }
         }
 
         // 获取数据指针
-        uint8_t *get_data() { return data; }
+        uint8_t *get_data()
+        {
+            return data.get();
+            ;
+        }
 
         // 获取缓冲区类型
         Type get_type() const { return type; }
@@ -68,49 +72,10 @@ namespace bos::mm
         size_t get_size() const { return size; }
 
     private:
-        Type type;     // 缓冲区类型
-        size_t size;   // 缓冲区大小
-        uint8_t *data; // 数据指针（普通内存或DMA内存）
-        int dma_fd;    // DMA缓冲区的文件描述符
-    };
-
-    // Plane 类，继承自 Buffer
-    class Plane : public Buffer
-    {
-    public:
-        Plane(Buffer::Type type, size_t size, int dma_fd, size_t width, size_t height, size_t stride)
-            : Buffer(type, size, dma_fd), width(width), height(height), stride(stride) {}
-
-        size_t get_width() const { return width; }
-        size_t get_height() const { return height; }
-        size_t get_stride() const { return stride; }
-
-        // 转换为 OpenCL 缓冲区
-        cl_mem to_cl_mem(cl_context context, cl_command_queue queue, bool is_dma = false)
-        {
-            if (is_dma && get_type() == Buffer::Type::DMABUF)
-            {
-                // 使用 DMA FD 创建 cl_mem
-                int fd = get_dma_fd();
-                cl_mem_flags flags = CL_MEM_READ_WRITE | CL_MEM_USE_HOST_PTR;
-                return clCreateBufferFromFd(context, fd, flags, get_stride() * get_height(), nullptr);
-            }
-            else
-            {
-                // 使用普通内存创建 cl_mem
-                uint8_t *ptr = get_data();
-                if (ptr == nullptr)
-                {
-                    std::cerr << "Failed to get plane data." << std::endl;
-                    return nullptr;
-                }
-                cl_mem_flags flags = CL_MEM_READ_WRITE | CL_MEM_USE_HOST_PTR;
-                return clCreateBuffer(context, flags, get_stride() * get_height(), ptr, nullptr);
-            }
-        }
-
-    private:
-        size_t width, height, stride;  // 图像平面特定的属性
+        Type type;                       // 缓冲区类型
+        size_t size;                     // 缓冲区大小
+        std::unique_ptr<uint8_t[]> data; // 数据指针（普通内存或DMA内存）
+        int dma_fd;                      // DMA缓冲区的文件描述符
     };
 
     // BufferPool 类
