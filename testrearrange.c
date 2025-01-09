@@ -15,6 +15,7 @@
         }                                                                                                                                        \
     } while (0)
 
+// 读取文件到缓冲区
 std::vector<uint8_t> readFile(const std::string &filename)
 {
     std::ifstream file(filename, std::ios::binary); // 以二进制模式打开文件
@@ -30,7 +31,7 @@ std::vector<uint8_t> readFile(const std::string &filename)
     file.read(reinterpret_cast<char *>(buffer.data()), size);
     return buffer;
 }
-// 读取文件到缓冲区
+
 // 加载 OpenCL kernel 文件
 char *load_kernel_source(const char *filename, size_t *size)
 {
@@ -73,12 +74,18 @@ int main()
     const int input_height = 1300;
     const int output_width = 8000;
     const int output_height = 1500;
+    const int side_margin = (output_width - input_width) / 5;
+    const int top_bottom_margin = (output_height - input_height)/2;
 
     // 读取输入 NV21 数据
     std::vector<uint8_t> input_data = readFile(input_filename);
 
     // 分配输出 NV21 数据缓冲区
     std::vector<uint8_t> output_data(output_width * output_height * 3 / 2, 0);
+
+    // 将 NV21 数据拆分为 Y 和 UV 分量
+    std::vector<uint8_t> y_data(input_data.begin(), input_data.begin() + input_width * input_height);
+    std::vector<uint8_t> uv_data(input_data.begin() + input_width * input_height, input_data.end());
 
     // OpenCL 变量
     cl_platform_id platform;
@@ -87,7 +94,7 @@ int main()
     cl_command_queue queue;
     cl_program program;
     cl_kernel kernel;
-    cl_mem input_buffer, output_buffer;
+    cl_mem y_image, uv_image, output_buffer;
 
     // 获取平台
     CHECK_OPENCL_ERROR(clGetPlatformIDs(1, &platform, nullptr));
@@ -111,11 +118,25 @@ int main()
         exit(1);
     }
 
-    // 创建输入缓冲区
-    input_buffer = clCreateBuffer(context, CL_MEM_READ_ONLY, input_data.size(), nullptr, nullptr);
-    if (!input_buffer)
+    // 创建 Y 分量图像
+    cl_image_format y_format;
+    y_format.image_channel_order = CL_R;              // 单通道
+    y_format.image_channel_data_type = CL_UNORM_INT8; // 8 位无符号整数
+    y_image = clCreateImage2D(context, CL_MEM_READ_ONLY | CL_MEM_COPY_HOST_PTR, &y_format, input_width, input_height, 0, y_data.data(), nullptr);
+    if (!y_image)
     {
-        std::cerr << "Failed to create input buffer" << std::endl;
+        std::cerr << "Failed to create Y image" << std::endl;
+        exit(1);
+    }
+
+    // 创建 UV 分量图像
+    cl_image_format uv_format;
+    uv_format.image_channel_order = CL_RG;             // 双通道
+    uv_format.image_channel_data_type = CL_UNORM_INT8; // 8 位无符号整数
+    uv_image = clCreateImage2D(context, CL_MEM_READ_ONLY | CL_MEM_COPY_HOST_PTR, &uv_format, input_width / 2, input_height / 2, 0, uv_data.data(), nullptr);
+    if (!uv_image)
+    {
+        std::cerr << "Failed to create UV image" << std::endl;
         exit(1);
     }
 
@@ -127,14 +148,9 @@ int main()
         exit(1);
     }
 
-    // 将输入数据复制到设备
-    CHECK_OPENCL_ERROR(clEnqueueWriteBuffer(queue, input_buffer, CL_TRUE, 0, input_data.size(), input_data.data(), 0, nullptr, nullptr));
-
     // 读取内核文件
     size_t kernel_size;
     char *kernel_source = load_kernel_source("rearrange.cl", &kernel_size);
-
-    // printf("kernel  = %s", kernel_source_ptr);
 
     // 创建程序
     program = clCreateProgramWithSource(context, 1, (const char **)&kernel_source, nullptr, nullptr);
@@ -167,12 +183,15 @@ int main()
     }
 
     // 设置内核参数
-    CHECK_OPENCL_ERROR(clSetKernelArg(kernel, 0, sizeof(cl_mem), &input_buffer));
-    CHECK_OPENCL_ERROR(clSetKernelArg(kernel, 1, sizeof(cl_mem), &output_buffer));
-    CHECK_OPENCL_ERROR(clSetKernelArg(kernel, 2, sizeof(int), &input_width));
-    CHECK_OPENCL_ERROR(clSetKernelArg(kernel, 3, sizeof(int), &input_height));
-    CHECK_OPENCL_ERROR(clSetKernelArg(kernel, 4, sizeof(int), &output_width));
-    CHECK_OPENCL_ERROR(clSetKernelArg(kernel, 5, sizeof(int), &output_height));
+    CHECK_OPENCL_ERROR(clSetKernelArg(kernel, 0, sizeof(cl_mem), &y_image));
+    CHECK_OPENCL_ERROR(clSetKernelArg(kernel, 1, sizeof(cl_mem), &uv_image));
+    CHECK_OPENCL_ERROR(clSetKernelArg(kernel, 2, sizeof(cl_mem), &output_buffer));
+    CHECK_OPENCL_ERROR(clSetKernelArg(kernel, 3, sizeof(int), &input_width));
+    CHECK_OPENCL_ERROR(clSetKernelArg(kernel, 4, sizeof(int), &input_height));
+    CHECK_OPENCL_ERROR(clSetKernelArg(kernel, 5, sizeof(int), &output_width));
+    CHECK_OPENCL_ERROR(clSetKernelArg(kernel, 6, sizeof(int), &output_height));
+    CHECK_OPENCL_ERROR(clSetKernelArg(kernel, 7, sizeof(int), &side_margin));
+    CHECK_OPENCL_ERROR(clSetKernelArg(kernel, 8, sizeof(int), &top_bottom_margin));
 
     // 执行内核
     size_t global_work_size[2] = {static_cast<size_t>(output_width), static_cast<size_t>(output_height)};
@@ -181,11 +200,13 @@ int main()
     // 将输出数据复制回主机
     CHECK_OPENCL_ERROR(clEnqueueReadBuffer(queue, output_buffer, CL_TRUE, 0, output_data.size(), output_data.data(), 0, nullptr, nullptr));
     CHECK_OPENCL_ERROR(clFinish(queue));
+
     // 保存输出数据到文件
     writeFile(output_filename, output_data);
 
     // 释放资源
-    clReleaseMemObject(input_buffer);
+    clReleaseMemObject(y_image);
+    clReleaseMemObject(uv_image);
     clReleaseMemObject(output_buffer);
     clReleaseKernel(kernel);
     clReleaseProgram(program);
