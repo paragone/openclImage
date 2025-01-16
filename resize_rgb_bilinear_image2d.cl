@@ -21,5 +21,5 @@ __kernel void resize_rgb_bilinear(
     float4 pixel = read_imagef(input, sampler, (float2)(in_x, in_y));
 
     // 将结果写入输出图像
-    write_imageui(output, (int2)(x, y), convert_uint4(pixel * 255.0f)); // 将浮点值转换为 8 位整数
+    write_imagef(output, (int2)(x, y), pixel);
 }
